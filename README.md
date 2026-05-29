@@ -7,7 +7,7 @@ Inspired by [InstagramUnfollowers](https://github.com/davidarroyo1234/InstagramU
 ## 🚀 Usage
 
 ### Desktop
-1. Copy the script from **[YOUR_USERNAME.github.io/x-unfollowers](https://YOUR_USERNAME.github.io/x-unfollowers)**
+1. Copy the script from **[swg56.github.io/X-Twitter-follower-checker-code](https://swg56.github.io/X-Twitter-follower-checker-code)**
 2. Go to **x.com** and log in to your account
 3. Open the browser console:
    - Windows: `Ctrl + Shift + J`
@@ -49,8 +49,8 @@ Whitelist data is stored in your browser's `localStorage` under the key `xuf_whi
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/x-unfollowers.git
-cd x-unfollowers
+git clone https://github.com/SWG56/X-Twitter-follower-checker-code.git
+cd X-Twitter-follower-checker-code
 
 # Edit the source
 # Main script: src/main.js
@@ -66,12 +66,10 @@ python3 -m http.server 8080
 ### Project structure
 
 ```
-x-unfollowers/
+X-Twitter-follower-checker-code/
 ├── index.html        ← GitHub Pages site (copy button)
-├── src/
-│   └── main.js       ← Source script (readable)
-├── dist/
-│   └── bundle.js     ← Built script (pasted in console)
+├── main.js           ← Source script (readable)
+├── bundle.js         ← Built script (pasted in console)
 ├── build.py          ← Build script
 └── README.md
 ```
