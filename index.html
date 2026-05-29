@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>X Unfollowers — See who doesn't follow you back</title>
+  <meta name="description" content="A browser-based tool to see who doesn't follow you back on X (Twitter). No downloads, no API keys, no login required." />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0a0a0a;
+      --surface: #111;
+      --surface2: #1a1a1a;
+      --border: #222;
+      --text: #f0f0f0;
+      --muted: #888;
+      --accent: #1d9bf0;
+      --accent-dark: #1677c7;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --radius: 12px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    /* ── Nav ── */
+    nav {
+      width: 100%;
+      max-width: 860px;
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 18px;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .nav-logo svg { flex-shrink: 0; }
+    .nav-links { display: flex; gap: 8px; }
+    .nav-link {
+      font-size: 13px;
+      color: var(--muted);
+      text-decoration: none;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      transition: color .15s, border-color .15s;
+    }
+    .nav-link:hover { color: var(--text); border-color: #444; }
+
+    /* ── Hero ── */
+    .hero {
+      max-width: 860px;
+      width: 100%;
+      padding: 60px 24px 40px;
+      text-align: center;
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      background: rgba(29,155,240,.1);
+      color: var(--accent);
+      border: 1px solid rgba(29,155,240,.25);
+      margin-bottom: 24px;
+    }
+    h1 {
+      font-size: clamp(32px, 6vw, 56px);
+      font-weight: 800;
+      line-height: 1.1;
+      letter-spacing: -1.5px;
+      margin-bottom: 16px;
+    }
+    h1 span { color: var(--accent); }
+    .hero-sub {
+      font-size: 18px;
+      color: var(--muted);
+      max-width: 520px;
+      margin: 0 auto 40px;
+      line-height: 1.6;
+    }
+
+    /* ── Steps ── */
+    .steps {
+      max-width: 860px;
+      width: 100%;
+      padding: 0 24px 40px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      counter-reset: step;
+    }
+    .step-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      counter-increment: step;
+      position: relative;
+    }
+    .step-card::before {
+      content: counter(step);
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      background: var(--surface2);
+      border-radius: 50%;
+      width: 22px;
+      height: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .step-icon {
+      font-size: 24px;
+      margin-bottom: 12px;
+    }
+    .step-card h3 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .step-card p {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    kbd {
+      font-family: monospace;
+      font-size: 11px;
+      background: var(--surface2);
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text);
+    }
+
+    /* ── Code Box ── */
+    .code-section {
+      max-width: 860px;
+      width: 100%;
+      padding: 0 24px 60px;
+    }
+    .code-section h2 {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .code-section h2 span {
+      font-size: 13px;
+      font-weight: 400;
+      color: var(--muted);
+      margin-left: auto;
+    }
+    .code-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .code-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface2);
+    }
+    .code-lang {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: monospace;
+    }
+    .copy-btn {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 20px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background .15s, transform .1s;
+      letter-spacing: .3px;
+    }
+    .copy-btn:hover { background: var(--accent-dark); }
+    .copy-btn:active { transform: scale(0.97); }
+    .copy-btn.copied { background: var(--success); }
+    .copy-btn svg { flex-shrink: 0; }
+    pre {
+      padding: 20px;
+      overflow-x: auto;
+      max-height: 320px;
+      overflow-y: auto;
+      font-family: "SF Mono", "Fira Code", Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      color: #a8c4e0;
+      scrollbar-width: thin;
+      scrollbar-color: #333 transparent;
+    }
+    pre::-webkit-scrollbar { width: 5px; height: 5px; }
+    pre::-webkit-scrollbar-track { background: transparent; }
+    pre::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
+    /* ── Warning ── */
+    .warning {
+      max-width: 860px;
+      width: 100%;
+      padding: 0 24px 40px;
+    }
+    .warning-box {
+      background: rgba(245,158,11,.08);
+      border: 1px solid rgba(245,158,11,.25);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      font-size: 13px;
+      color: #d97706;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      line-height: 1.6;
+    }
+    .warning-box span { font-size: 18px; flex-shrink: 0; }
+
+    /* ── Features ── */
+    .features {
+      max-width: 860px;
+      width: 100%;
+      padding: 0 24px 60px;
+    }
+    .features h2 {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+    }
+    .feature {
+      padding: 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 13px;
+      color: var(--muted);
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .feature-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+    .feature strong { display: block; color: var(--text); font-size: 14px; margin-bottom: 3px; }
+
+    /* ── Footer ── */
+    footer {
+      width: 100%;
+      border-top: 1px solid var(--border);
+      padding: 24px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    @media (max-width: 540px) {
+      h1 { letter-spacing: -1px; }
+      .nav-links { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <a class="nav-logo" href="#">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.73-8.835L1.254 2.25H8.08l4.259 5.63 5.905-5.63zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+      X Unfollowers
+    </a>
+    <div class="nav-links">
+      <a class="nav-link" href="https://github.com/YOUR_USERNAME/x-unfollowers" target="_blank">GitHub ↗</a>
+      <a class="nav-link" href="#how-it-works">How it works</a>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="hero-badge">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+      No login · No API key · 100% browser-based
+    </div>
+    <h1>See who doesn't<br/>follow you back<br/>on <span>X</span></h1>
+    <p class="hero-sub">
+      A browser-based script — paste it in your console while logged in to x.com. No installs, no credentials, no server.
+    </p>
+  </section>
+
+  <!-- Steps -->
+  <section class="steps" id="how-it-works">
+    <div class="step-card">
+      <div class="step-icon">📋</div>
+      <h3>Copy the code</h3>
+      <p>Click the <strong>COPY</strong> button below to copy the script to your clipboard.</p>
+    </div>
+    <div class="step-card">
+      <div class="step-icon">🌐</div>
+      <h3>Go to x.com</h3>
+      <p>Open <strong>x.com</strong> in your browser and make sure you're logged in to your account.</p>
+    </div>
+    <div class="step-card">
+      <div class="step-icon">🛠️</div>
+      <h3>Open the console</h3>
+      <p>Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>J</kbd> on Windows or <kbd>⌘</kbd>+<kbd>⌥</kbd>+<kbd>J</kbd> on Mac to open DevTools.</p>
+    </div>
+    <div class="step-card">
+      <div class="step-icon">▶️</div>
+      <h3>Paste &amp; run</h3>
+      <p>Paste the code in the console and press <kbd>Enter</kbd>. Click <strong>SCAN</strong> in the panel that appears.</p>
+    </div>
+  </section>
+
+  <!-- Warning -->
+  <div class="warning">
+    <div class="warning-box">
+      <span>⚠️</span>
+      <div>
+        <strong>Privacy notice:</strong> This script runs entirely in your browser and communicates only with X's own servers (<code>api.twitter.com</code>) using your existing login session. No data is sent anywhere else. Your credentials are never touched by this tool.
+      </div>
+    </div>
+  </div>
+
+  <!-- Code -->
+  <section class="code-section">
+    <h2>
+      Script
+      <span id="char-count">loading…</span>
+    </h2>
+    <div class="code-wrap">
+      <div class="code-toolbar">
+        <span class="code-lang">javascript — paste in browser console on x.com</span>
+        <button class="copy-btn" id="copy-btn" onclick="copyCode()">
+          <svg id="copy-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          COPY
+        </button>
+      </div>
+      <pre id="code-display">Loading…</pre>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="features">
+    <h2>Features</h2>
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="feature-icon">🔍</div>
+        <div><strong>Full scan</strong>Paginates through all your following/followers, no matter how many.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🤍</div>
+        <div><strong>Whitelist</strong>Click any avatar to protect accounts from showing up in your results. Persists in localStorage.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🔎</div>
+        <div><strong>Search &amp; filter</strong>Filter by "not following back" or whitelisted, and search by name or handle.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🌙</div>
+        <div><strong>Dark mode</strong>Automatically matches X's dark/light theme.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🚦</div>
+        <div><strong>Rate-limit safe</strong>Adds delays between API calls and auto-retries on 429 errors.</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🔒</div>
+        <div><strong>Zero data leak</strong>No external requests — only your browser talking to api.twitter.com.</div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>
+      Inspired by <a href="https://github.com/davidarroyo1234/InstagramUnfollowers" target="_blank">InstagramUnfollowers</a> by davidarroyo1234 &nbsp;·&nbsp;
+      <a href="https://github.com/YOUR_USERNAME/x-unfollowers" target="_blank">View on GitHub</a>
+    </p>
+  </footer>
+
+  <script>
+    // Embedded script (loaded inline so no external fetch needed on GitHub Pages)
+    const SCRIPT_CODE = `</script>
+  <script id="embedded-script">
+    // This tag is replaced by build.py — do not edit manually
+  </script>
+  <script>
+    `;
+
+    // Load the bundle via fetch (works on GitHub Pages)
+    fetch('dist/bundle.js')
+      .then(r => r.text())
+      .then(code => {
+        window._xufCode = code;
+        document.getElementById('code-display').textContent = code;
+        document.getElementById('char-count').textContent = code.length.toLocaleString() + ' chars';
+      })
+      .catch(() => {
+        // Fallback: read from inline embedded script tag
+        const inline = document.getElementById('embedded-script')?.textContent?.trim();
+        if (inline && inline.length > 100) {
+          window._xufCode = inline;
+          document.getElementById('code-display').textContent = inline;
+          document.getElementById('char-count').textContent = inline.length.toLocaleString() + ' chars';
+        } else {
+          document.getElementById('code-display').textContent = '// Could not load script. Check that dist/bundle.js exists in the repo.';
+          document.getElementById('char-count').textContent = 'error';
+        }
+      });
+
+    function copyCode() {
+      const code = window._xufCode;
+      if (!code) return;
+      navigator.clipboard.writeText(code).then(() => {
+        const btn = document.getElementById('copy-btn');
+        const icon = document.getElementById('copy-icon');
+        btn.classList.add('copied');
+        btn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> COPIED!`;
+        setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerHTML = `<svg id="copy-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> COPY`;
+        }, 2500);
+      });
+    }
+  </script>
+
+</body>
+</html>
