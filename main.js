@@ -13,17 +13,38 @@
   const MAX_SCROLL_ROUNDS = 600;
   const NAV_TIMEOUT_MS = 10000;
   const LS_WHITELIST_KEY = 'xuf_whitelist';
+  const PAGE_SIZE = 40;
+  const UNFOLLOW_MIN_DELAY_MS = 700;
+  const UNFOLLOW_MAX_DELAY_MS = 2200;
+  const UNFOLLOW_BATCH_SIZE = 5;
+  const UNFOLLOW_BATCH_PAUSE_MS = 25000;
+  const NAME_BLACKLIST = new Set(['follow', 'following', 'pending', 'unblock', 'blocked', 'follows you', 'verified account']);
 
   // ─── State ────────────────────────────────────────────────────
   let whitelist = JSON.parse(localStorage.getItem(LS_WHITELIST_KEY) || '[]');
-  let followingList = [];
-  let followerSet = new Set();
-  let notFollowingBack = [];
+  let results = []; // { screen_name, name, avatar, verified, followsBack }
+  let selected = new Set();
+  let unfollowLog = []; // { screen_name, name, success, error }
+  let unfollowLogFilter = { showSucceeded: true, showFailed: true };
+  let filter = { notFollowingBack: true, followingBack: false, verified: true };
+  let currentTab = 'nonWhitelisted'; // 'nonWhitelisted' | 'whitelisted'
+  let searchTerm = '';
+  let page = 1;
+  let viewState = 'idle'; // 'idle' | 'results' | 'unfollowing'
   let isRunning = false;
+  let isUnfollowing = false;
+  let stopUnfollowRequested = false;
+  let unfollowDone = 0;
+  let unfollowTotal = 0;
+  let unfollowStatusMsg = '';
 
-  // ─── Helpers ──────────────────────────────────────────────────
+  // ─── Generic helpers ──────────────────────────────────────────
   function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
+  }
+
+  function randomDelay(min, max) {
+    return min + Math.random() * (max - min);
   }
 
   async function waitForSelector(selector, timeoutMs) {
@@ -46,13 +67,31 @@
 
   // X's GraphQL API now requires anti-bot signing that a console script can't
   // replicate reliably, so instead of calling any API we drive the page itself:
-  // click the real Following/Followers links (so X's own router handles the
-  // navigation) and read user cards straight out of the rendered DOM.
+  // click real links so X's own router handles navigation, then read user
+  // cards straight out of the rendered DOM.
   function clickHref(href) {
     const el = document.querySelector(`a[href="${href}"]`);
     if (!el) return false;
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     return true;
+  }
+
+  async function navigateTo(path, timeoutMs = NAV_TIMEOUT_MS) {
+    if (location.pathname === path) return true;
+    if (!clickHref(path)) {
+      history.pushState({}, '', path);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+    return waitForPath(path, timeoutMs);
+  }
+
+  async function openFollowList(handle, kind) {
+    const path = `/${handle}/${kind}`;
+    if (!document.querySelector(`a[href="${path}"]`)) {
+      await navigateTo(`/${handle}`);
+      await waitForSelector(`a[href="${path}"]`, NAV_TIMEOUT_MS);
+    }
+    return navigateTo(path);
   }
 
   function getMyHandle() {
@@ -63,8 +102,18 @@
     return m ? m[1] : null;
   }
 
-  function extractUsersFromDom() {
-    const cells = document.querySelectorAll('[data-testid="UserCell"]');
+  function getTimelineContainer(kind) {
+    const els = document.querySelectorAll('[aria-label]');
+    for (const el of els) {
+      const label = (el.getAttribute('aria-label') || '').toLowerCase();
+      if (label.startsWith('timeline') && label.includes(kind)) return el;
+    }
+    return null;
+  }
+
+  function extractUsersFromDom(scope) {
+    const root = scope || document;
+    const cells = root.querySelectorAll('[data-testid="UserCell"]');
     const users = [];
     cells.forEach(cell => {
       let screenName = null;
@@ -82,23 +131,23 @@
       if (!screenName) return;
       const img = cell.querySelector('img');
       const avatar = img ? img.src : '';
+      const verified = !!cell.querySelector('svg[aria-label="Verified account"]');
       let name = screenName;
       for (const span of cell.querySelectorAll('span')) {
         const t = span.textContent.trim();
-        if (t && !t.startsWith('@') && t !== 'Follows you') { name = t; break; }
+        if (t && !t.startsWith('@') && !NAME_BLACKLIST.has(t.toLowerCase())) { name = t; break; }
       }
-      users.push({ screen_name: screenName, name, avatar });
+      users.push({ screen_name: screenName, name, avatar, verified });
     });
     return users;
   }
 
-  async function collectAllUsers(onProgress) {
+  async function collectAllUsers(kind, onProgress) {
+    const container = getTimelineContainer(kind) || document;
     const seen = new Map();
-    let idle = 0;
-    let lastHeight = -1;
-    let rounds = 0;
+    let idle = 0, lastHeight = -1, rounds = 0;
     while (idle < IDLE_ROUNDS && rounds < MAX_SCROLL_ROUNDS) {
-      extractUsersFromDom().forEach(u => seen.set(u.screen_name, u));
+      extractUsersFromDom(container).forEach(u => seen.set(u.screen_name, u));
       onProgress(seen.size);
       window.scrollTo(0, document.body.scrollHeight);
       await sleep(SCROLL_DELAY_MS);
@@ -110,6 +159,35 @@
     return [...seen.values()];
   }
 
+  // ─── Derived data ─────────────────────────────────────────────
+  function getFilteredResults() {
+    let list = currentTab === 'whitelisted'
+      ? results.filter(u => whitelist.includes(u.screen_name))
+      : results.filter(u => !whitelist.includes(u.screen_name));
+
+    list = list.filter(u => {
+      if (u.followsBack && !filter.followingBack) return false;
+      if (!u.followsBack && !filter.notFollowingBack) return false;
+      if (u.verified && !filter.verified) return false;
+      return true;
+    });
+
+    if (searchTerm) {
+      const q = searchTerm.toLowerCase();
+      list = list.filter(u => u.name.toLowerCase().includes(q) || u.screen_name.toLowerCase().includes(q));
+    }
+    return [...list].sort((a, b) => a.screen_name.localeCompare(b.screen_name));
+  }
+
+  function getMaxPage(list) {
+    return Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+  }
+
+  function getCurrentPageItems(list) {
+    const p = Math.min(page, getMaxPage(list));
+    return list.slice((p - 1) * PAGE_SIZE, p * PAGE_SIZE);
+  }
+
   // ─── Whitelist ────────────────────────────────────────────────
   function toggleWhitelist(screenName) {
     if (whitelist.includes(screenName)) {
@@ -118,64 +196,123 @@
       whitelist.push(screenName);
     }
     localStorage.setItem(LS_WHITELIST_KEY, JSON.stringify(whitelist));
-    UI.renderResults();
+    UI.refreshSidebar();
+    UI.refreshMain();
   }
 
   // ─── Main Scan ────────────────────────────────────────────────
   async function runScan() {
     if (isRunning) return;
     isRunning = true;
-    followingList = [];
-    followerSet = new Set();
-    notFollowingBack = [];
+    results = [];
+    selected = new Set();
+    searchTerm = '';
+    page = 1;
     UI.setScanBtn(false);
     try {
       UI.setStatus('Detecting your profile…', 'info');
       const handle = getMyHandle();
       if (!handle) throw new Error('Could not detect your username. Make sure you are logged in to x.com and reload the page.');
 
-      const followingPath = `/${handle}/following`;
-      const followersPath = `/${handle}/followers`;
-
-      if (!document.querySelector(`a[href="${followingPath}"]`)) {
-        UI.setStatus('Opening your profile…', 'info');
-        if (!clickHref(`/${handle}`)) throw new Error('Could not open your profile page.');
-        const found = await waitForSelector(`a[href="${followingPath}"]`, NAV_TIMEOUT_MS);
-        if (!found) throw new Error('Could not load your profile page. Open it manually, then click SCAN again.');
-      }
-
       UI.setStatus(`Opening @${handle}'s Following list…`, 'info');
       UI.setLabel('Following');
-      if (location.pathname !== followingPath) {
-        if (!clickHref(followingPath)) throw new Error(`Could not open ${followingPath}. Open it manually, then click SCAN again.`);
-        await waitForPath(followingPath, NAV_TIMEOUT_MS);
-        await sleep(1200);
+      if (!(await openFollowList(handle, 'following'))) {
+        throw new Error(`Could not open /${handle}/following. Open it manually, then click SCAN again.`);
       }
+      await sleep(500);
       const followingOk = await waitForSelector('[data-testid="UserCell"]', NAV_TIMEOUT_MS);
       if (!followingOk) throw new Error('Your Following list did not load. Try scrolling down manually, then click SCAN again.');
       UI.setStatus('Scanning who you follow…', 'info');
-      followingList = await collectAllUsers(n => UI.setProgress(n));
+      const followingList = await collectAllUsers('following', n => UI.setProgress(n));
 
       UI.setStatus(`Opening @${handle}'s Followers list…`, 'info');
       UI.setLabel('Followers');
-      if (!clickHref(followersPath)) throw new Error(`Could not open ${followersPath}. Open it manually, then click SCAN again.`);
-      await waitForPath(followersPath, NAV_TIMEOUT_MS);
-      await sleep(1200);
+      if (!(await openFollowList(handle, 'followers'))) {
+        throw new Error(`Could not open /${handle}/followers. Open it manually, then click SCAN again.`);
+      }
+      await sleep(500);
       const followersOk = await waitForSelector('[data-testid="UserCell"]', NAV_TIMEOUT_MS);
       if (!followersOk) throw new Error('Your Followers list did not load. Try scrolling down manually, then click SCAN again.');
       UI.setStatus('Scanning your followers…', 'info');
-      const followers = await collectAllUsers(n => UI.setProgress(n));
-      followerSet = new Set(followers.map(u => u.screen_name));
+      const followers = await collectAllUsers('followers', n => UI.setProgress(n));
+      const followerSet = new Set(followers.map(u => u.screen_name));
 
-      notFollowingBack = followingList.filter(u => !followerSet.has(u.screen_name));
-      UI.setStatus(`Done! ${notFollowingBack.length} people don't follow you back.`, 'success');
-      UI.showResults(notFollowingBack, followingList.length, followers.length);
+      results = followingList.map(u => ({ ...u, followsBack: followerSet.has(u.screen_name) }));
+      const notBackCount = results.filter(u => !u.followsBack).length;
+      UI.setStatus(`Done! ${notBackCount} people don't follow you back.`, 'success');
+      viewState = 'results';
+      UI.renderBody();
     } catch (e) {
       UI.setStatus('Error: ' + e.message, 'error');
     } finally {
       isRunning = false;
       UI.setScanBtn(true);
     }
+  }
+
+  // ─── Unfollow automation ──────────────────────────────────────
+  async function unfollowUser(user) {
+    const ok = await navigateTo(`/${user.screen_name}`);
+    if (!ok) throw new Error('Could not open profile.');
+    const found = await waitForSelector('button[data-testid$="-unfollow"]', NAV_TIMEOUT_MS);
+    if (!found) throw new Error('Following button not found (already unfollowed or page changed).');
+    document.querySelector('button[data-testid$="-unfollow"]')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    const confirmFound = await waitForSelector('[data-testid="confirmationSheetConfirm"]', 5000);
+    if (!confirmFound) throw new Error('Confirmation dialog did not appear.');
+    document.querySelector('[data-testid="confirmationSheetConfirm"]')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    await sleep(1000);
+  }
+
+  async function runUnfollowQueue() {
+    const targets = results.filter(u => selected.has(u.screen_name));
+    if (!targets.length || isUnfollowing) return;
+    const plural = targets.length > 1 ? 's' : '';
+    if (!confirm(`Unfollow ${targets.length} account${plural}? This opens each profile and clicks Unfollow. It can't be batch-undone.`)) return;
+
+    isUnfollowing = true;
+    stopUnfollowRequested = false;
+    unfollowLog = [];
+    unfollowDone = 0;
+    unfollowTotal = targets.length;
+    unfollowStatusMsg = '';
+    viewState = 'unfollowing';
+    UI.renderBody();
+
+    for (let i = 0; i < targets.length; i++) {
+      if (stopUnfollowRequested) break;
+      const user = targets[i];
+      unfollowStatusMsg = `Unfollowing @${user.screen_name}…`;
+      UI.refreshSidebar();
+      try {
+        await unfollowUser(user);
+        unfollowLog.push({ screen_name: user.screen_name, name: user.name, success: true });
+        results = results.filter(u => u.screen_name !== user.screen_name);
+        selected.delete(user.screen_name);
+      } catch (e) {
+        unfollowLog.push({ screen_name: user.screen_name, name: user.name, success: false, error: e.message });
+      }
+      unfollowDone = i + 1;
+      UI.refreshSidebar();
+      UI.refreshMain();
+      if (!stopUnfollowRequested && i < targets.length - 1) {
+        await sleep(randomDelay(UNFOLLOW_MIN_DELAY_MS, UNFOLLOW_MAX_DELAY_MS));
+        if ((i + 1) % UNFOLLOW_BATCH_SIZE === 0) {
+          unfollowStatusMsg = 'Pausing briefly to avoid rate limits…';
+          UI.refreshSidebar();
+          await sleep(UNFOLLOW_BATCH_PAUSE_MS + (Math.random() * 8000 - 4000));
+        }
+      }
+    }
+
+    isUnfollowing = false;
+    unfollowStatusMsg = '';
+    UI.refreshSidebar();
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   // ─── UI ───────────────────────────────────────────────────────
@@ -186,35 +323,53 @@
       if (document.getElementById(ID)) return;
       const style = document.createElement('style');
       style.textContent = `
+        #xuf-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999998}
         #xuf-root *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-        #xuf-root{position:fixed;top:20px;right:20px;width:380px;max-height:80vh;background:#fff;border:1px solid #e1e8ed;border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.15);z-index:9999999;overflow:hidden;display:flex;flex-direction:column;font-size:14px;color:#0f1419}
-        #xuf-header{background:#000;color:#fff;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+        #xuf-root{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:min(1040px,94vw);height:min(720px,90vh);background:#fff;border:1px solid #e1e8ed;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.4);z-index:9999999;overflow:hidden;display:flex;flex-direction:column;font-size:14px;color:#0f1419}
+        #xuf-header{background:#000;color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
         #xuf-header h2{font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px}
         #xuf-close{background:none;border:none;color:#fff;cursor:pointer;font-size:20px;line-height:1;padding:2px 6px;border-radius:6px;opacity:.7;transition:opacity .15s}
         #xuf-close:hover{opacity:1}
-        #xuf-body{padding:14px 16px;overflow-y:auto;flex:1}
-        #xuf-status{font-size:13px;padding:8px 12px;border-radius:8px;margin-bottom:12px;display:none}
+        #xuf-body{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+        #xuf-idle{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:40px}
+        #xuf-idle #xuf-scan-btn{width:240px;padding:14px;font-size:16px}
+        #xuf-status{font-size:13px;padding:8px 14px;border-radius:8px;display:none;max-width:520px;text-align:center}
         #xuf-status.info{background:#e8f5fd;color:#1d9bf0;border:1px solid #b3d9f5}
         #xuf-status.warn{background:#fff3cd;color:#856404;border:1px solid #ffecb5}
         #xuf-status.success{background:#e6f4ea;color:#188038;border:1px solid #b8dfc4}
         #xuf-status.error{background:#fce8e6;color:#c5221f;border:1px solid #f5c6c5}
-        #xuf-scan-btn{width:100%;padding:10px;background:#000;color:#fff;border:none;border-radius:999px;font-size:15px;font-weight:700;cursor:pointer;transition:background .15s;margin-bottom:12px}
+        #xuf-scan-btn{padding:10px;background:#000;color:#fff;border:none;border-radius:999px;font-size:15px;font-weight:700;cursor:pointer;transition:background .15s}
         #xuf-scan-btn:hover:not(:disabled){background:#333}
         #xuf-scan-btn:disabled{opacity:.5;cursor:not-allowed}
-        #xuf-progress-wrap{height:4px;background:#e1e8ed;border-radius:2px;margin-bottom:12px;overflow:hidden;display:none}
-        #xuf-progress-fill{height:100%;background:#1d9bf0;border-radius:2px;transition:width .3s;width:0%}
-        #xuf-progress-label{font-size:12px;color:#536471;margin-bottom:12px;display:none}
-        #xuf-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px;display:none}
-        .xuf-stat{background:#f7f9f9;border-radius:10px;padding:8px 10px;text-align:center}
-        .xuf-stat-n{font-size:18px;font-weight:700;color:#0f1419}
-        .xuf-stat-l{font-size:11px;color:#536471;margin-top:2px}
-        #xuf-filter-row{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;display:none}
-        .xuf-filter{font-size:12px;padding:4px 12px;border-radius:999px;border:1px solid #cfd9de;background:#fff;cursor:pointer;transition:all .12s;color:#0f1419}
-        .xuf-filter.active{background:#000;color:#fff;border-color:#000}
-        #xuf-search{width:100%;padding:7px 10px;border:1px solid #cfd9de;border-radius:999px;font-size:13px;margin-bottom:10px;outline:none;display:none;color:#0f1419}
+        #xuf-progress-wrap{width:240px;height:4px;background:#e1e8ed;border-radius:2px;overflow:hidden;display:none}
+        #xuf-progress-fill{height:100%;background:#1d9bf0;border-radius:2px;transition:width .3s;width:100%}
+        #xuf-progress-label{font-size:12px;color:#536471;display:none}
+        #xuf-workspace{flex:1;display:flex;overflow:hidden;min-height:0}
+        #xuf-sidebar{width:230px;flex-shrink:0;border-right:1px solid #e1e8ed;padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+        #xuf-main{flex:1;display:flex;flex-direction:column;overflow:hidden;padding:16px;min-width:0}
+        .xuf-panel-heading{display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:14px}
+        .xuf-group-label{font-size:11px;text-transform:uppercase;color:#536471;font-weight:700;margin-bottom:4px}
+        .xuf-badge{display:flex;align-items:center;gap:6px;font-size:13px;padding:4px 0;cursor:pointer}
+        .xuf-btn-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+        .xuf-btn-secondary{font-size:11px;padding:6px 4px;border-radius:8px;border:1px solid #cfd9de;background:#fff;cursor:pointer;color:#0f1419}
+        .xuf-btn-secondary:hover{border-color:#000}
+        .xuf-btn-secondary.danger{color:#e0245e;border-color:#e0245e}
+        .xuf-stats p{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;color:#536471}
+        .xuf-stats strong{color:#0f1419}
+        .xuf-summary h4{font-size:11px;text-transform:uppercase;color:#536471;margin-bottom:6px;font-weight:700}
+        .xuf-summary-grid{display:flex;flex-direction:column;gap:4px}
+        .xuf-summary-grid div{display:flex;justify-content:space-between;font-size:12px}
+        .xuf-pagination{display:flex;align-items:center;justify-content:center;gap:10px;font-size:13px}
+        .xuf-pagination button{background:none;border:none;cursor:pointer;font-size:14px;color:#1d9bf0;padding:4px 8px}
+        #xuf-unfollow-btn{margin-top:auto;padding:12px;background:#e0245e;color:#fff;border:none;border-radius:999px;font-weight:700;cursor:pointer;font-size:14px}
+        #xuf-unfollow-btn:disabled{opacity:.4;cursor:not-allowed}
+        .xuf-tabs{display:flex;gap:4px;border-bottom:1px solid #e1e8ed;margin-bottom:10px;flex-shrink:0}
+        .xuf-tab{flex:1;padding:8px;background:none;border:none;border-bottom:2px solid transparent;font-weight:700;font-size:13px;color:#536471;cursor:pointer}
+        .xuf-tab.active{color:#1d9bf0;border-color:#1d9bf0}
+        #xuf-search{width:100%;padding:7px 10px;border:1px solid #cfd9de;border-radius:999px;font-size:13px;margin-bottom:10px;outline:none;color:#0f1419;flex-shrink:0}
         #xuf-search:focus{border-color:#1d9bf0}
-        #xuf-list{display:flex;flex-direction:column;gap:8px}
-        .xuf-user{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid #e1e8ed;border-radius:12px;background:#fff;transition:background .1s}
+        #xuf-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+        .xuf-user{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid #e1e8ed;border-radius:12px;background:#fff;transition:background .1s;cursor:default}
         .xuf-user:hover{background:#f7f9f9}
         .xuf-avatar{width:40px;height:40px;border-radius:50%;flex-shrink:0;border:1px solid #e1e8ed;cursor:pointer;position:relative;overflow:hidden;background:#e1e8ed}
         .xuf-avatar img{width:100%;height:100%;object-fit:cover}
@@ -222,32 +377,42 @@
         .xuf-avatar.wl::after{content:'✓';position:absolute;bottom:0;right:0;background:#1d9bf0;color:#fff;font-size:9px;width:14px;height:14px;display:flex;align-items:center;justify-content:center;border-radius:50%}
         .xuf-info{flex:1;min-width:0}
         .xuf-name{font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#0f1419}
+        .xuf-verified{color:#1d9bf0;font-size:11px}
         .xuf-handle{font-size:12px;color:#536471}
-        .xuf-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
-        .xuf-profile-btn{font-size:11px;padding:4px 10px;border-radius:999px;border:1px solid #cfd9de;background:#fff;cursor:pointer;color:#0f1419;text-decoration:none;white-space:nowrap}
+        .xuf-followsback{font-size:11px;color:#22c55e;margin-left:6px}
+        .xuf-profile-btn{font-size:11px;padding:4px 10px;border-radius:999px;border:1px solid #cfd9de;background:#fff;cursor:pointer;color:#0f1419;text-decoration:none;white-space:nowrap;flex-shrink:0}
         .xuf-profile-btn:hover{border-color:#000}
-        .xuf-wl-btn{font-size:11px;padding:4px 10px;border-radius:999px;border:1px solid #1d9bf0;background:#fff;cursor:pointer;color:#1d9bf0;white-space:nowrap}
-        .xuf-wl-btn:hover{background:#e8f5fd}
-        .xuf-wl-btn.wl{background:#1d9bf0;color:#fff}
+        .xuf-select{width:18px;height:18px;flex-shrink:0;cursor:pointer}
         .xuf-empty{text-align:center;padding:2rem;color:#536471;font-size:13px}
+        .xuf-queue-status{font-size:12px;color:#1d9bf0;background:#e8f5fd;border:1px solid #b3d9f5;padding:6px 8px;border-radius:8px}
+        .xuf-log-entry{padding:8px 10px;font-size:13px;border-bottom:1px solid #f0f0f0}
+        .xuf-log-entry.success a{color:#1d9bf0;text-decoration:none}
+        .xuf-log-entry.failed{color:#e0245e}
+        .xuf-log-index{color:#536471;font-size:11px}
+        .xuf-all-done{text-align:center;padding:16px;font-size:16px;font-weight:700;color:#22c55e}
         #xuf-footer{padding:10px 16px;border-top:1px solid #e1e8ed;font-size:11px;color:#536471;display:flex;justify-content:space-between;align-items:center;flex-shrink:0}
         #xuf-footer a{color:#1d9bf0;text-decoration:none}
         @media(prefers-color-scheme:dark){
           #xuf-root{background:#15202b;border-color:#38444d;color:#f7f9f9}
           #xuf-header{background:#1d9bf0}
-          .xuf-stat{background:#1e2732}
-          .xuf-stat-n{color:#f7f9f9}
+          #xuf-sidebar{border-color:#38444d}
+          .xuf-btn-secondary{background:#15202b;border-color:#38444d;color:#f7f9f9}
+          .xuf-tabs{border-color:#38444d}
+          .xuf-tab{color:#8899a6}
+          #xuf-search{background:#1e2732;border-color:#38444d;color:#f7f9f9}
           .xuf-user{border-color:#38444d;background:#15202b}
           .xuf-user:hover{background:#1e2732}
           .xuf-name{color:#f7f9f9}
-          #xuf-search{background:#1e2732;border-color:#38444d;color:#f7f9f9}
-          .xuf-filter{border-color:#38444d;background:#15202b;color:#f7f9f9}
-          .xuf-filter.active{background:#1d9bf0;border-color:#1d9bf0}
           .xuf-profile-btn{background:#15202b;border-color:#38444d;color:#f7f9f9}
+          .xuf-log-entry{border-color:#2f3b44}
           #xuf-footer{border-color:#38444d;background:#15202b}
         }
       `;
       document.head.appendChild(style);
+
+      const backdrop = document.createElement('div');
+      backdrop.id = 'xuf-backdrop';
+      document.body.appendChild(backdrop);
 
       const root = document.createElement('div');
       root.id = ID;
@@ -257,47 +422,93 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.73-8.835L1.254 2.25H8.08l4.259 5.63 5.905-5.63zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
             Unfollowers
           </h2>
-          <button id="xuf-close" title="Close">✕</button>
+          <button id="xuf-close" data-action="close" title="Close">✕</button>
         </div>
-        <div id="xuf-body">
-          <div id="xuf-status"></div>
-          <button id="xuf-scan-btn">▶ SCAN</button>
-          <div id="xuf-progress-wrap"><div id="xuf-progress-fill"></div></div>
-          <div id="xuf-progress-label"></div>
-          <div id="xuf-stats">
-            <div class="xuf-stat"><div class="xuf-stat-n" id="xuf-s-following">0</div><div class="xuf-stat-l">Following</div></div>
-            <div class="xuf-stat"><div class="xuf-stat-n" id="xuf-s-followers">0</div><div class="xuf-stat-l">Followers</div></div>
-            <div class="xuf-stat"><div class="xuf-stat-n" id="xuf-s-notback" style="color:#e0245e">0</div><div class="xuf-stat-l">Not back</div></div>
-          </div>
-          <div id="xuf-filter-row">
-            <button class="xuf-filter active" data-f="all">All</button>
-            <button class="xuf-filter" data-f="notback">Not following back</button>
-            <button class="xuf-filter" data-f="whitelisted">Whitelisted</button>
-          </div>
-          <input id="xuf-search" type="text" placeholder="Search by name or @handle…" />
-          <div id="xuf-list"><div class="xuf-empty">Click SCAN to start.</div></div>
-        </div>
+        <div id="xuf-body"></div>
         <div id="xuf-footer">
           <span>💙 <a href="https://github.com/SWG56/X-Twitter-follower-checker-code" target="_blank">x-unfollowers</a></span>
-          <span>Click avatar to whitelist</span>
+          <span>Click avatar to whitelist · Check a box to select for unfollow</span>
         </div>
       `;
       document.body.appendChild(root);
 
-      document.getElementById('xuf-close').onclick = () => root.remove();
-      document.getElementById('xuf-scan-btn').onclick = runScan;
-      document.querySelectorAll('.xuf-filter').forEach(btn => {
-        btn.onclick = () => {
-          document.querySelectorAll('.xuf-filter').forEach(b => b.classList.remove('active'));
-          btn.classList.add('active');
-          currentFilter = btn.dataset.f;
-          renderResults();
-        };
-      });
-      document.getElementById('xuf-search').oninput = () => renderResults();
+      root.addEventListener('click', onRootClick);
+      root.addEventListener('change', onRootChange);
+      root.addEventListener('input', onRootInput);
+
+      renderBody();
     }
 
-    let _following = 0, _followers = 0, currentFilter = 'all';
+    function onRootClick(e) {
+      const el = e.target.closest('[data-action]');
+      if (!el) return;
+      const action = el.dataset.action;
+      if (action === 'scan') {
+        runScan();
+      } else if (action === 'close') {
+        document.getElementById('xuf-backdrop')?.remove();
+        document.getElementById(ID)?.remove();
+      } else if (action === 'tab') {
+        currentTab = el.dataset.tab;
+        page = 1;
+        document.querySelectorAll('.xuf-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === currentTab));
+        refreshSidebar();
+        refreshMain();
+      } else if (action === 'select-all') {
+        getFilteredResults().forEach(u => selected.add(u.screen_name));
+        refreshSidebar();
+        refreshMain();
+      } else if (action === 'select-verified') {
+        getFilteredResults().filter(u => u.verified).forEach(u => selected.add(u.screen_name));
+        refreshSidebar();
+        refreshMain();
+      } else if (action === 'clear-selection') {
+        selected.clear();
+        refreshSidebar();
+        refreshMain();
+      } else if (action === 'prev-page') {
+        if (page > 1) { page--; refreshSidebar(); refreshMain(); }
+      } else if (action === 'next-page') {
+        const max = getMaxPage(getFilteredResults());
+        if (page < max) { page++; refreshSidebar(); refreshMain(); }
+      } else if (action === 'unfollow-selected') {
+        runUnfollowQueue();
+      } else if (action === 'toggle-whitelist') {
+        toggleWhitelist(el.dataset.user);
+      } else if (action === 'stop-unfollow') {
+        stopUnfollowRequested = true;
+      } else if (action === 'back-to-results') {
+        viewState = 'results';
+        renderBody();
+      }
+    }
+
+    function onRootChange(e) {
+      const el = e.target.closest('[data-action]');
+      if (!el) return;
+      const action = el.dataset.action;
+      if (action === 'toggle-filter') {
+        filter[el.dataset.filter] = el.checked;
+        page = 1;
+        refreshSidebar();
+        refreshMain();
+      } else if (action === 'toggle-select') {
+        if (el.checked) selected.add(el.dataset.user); else selected.delete(el.dataset.user);
+        refreshSidebar();
+      } else if (action === 'toggle-log-filter') {
+        unfollowLogFilter[el.dataset.logfilter] = el.checked;
+        refreshMain();
+      }
+    }
+
+    function onRootInput(e) {
+      const el = e.target.closest('[data-action="search"]');
+      if (!el) return;
+      searchTerm = el.value;
+      page = 1;
+      refreshSidebar();
+      refreshMain();
+    }
 
     function setStatus(msg, type) {
       const el = document.getElementById('xuf-status');
@@ -312,16 +523,13 @@
       if (!el) return;
       el.textContent = label;
       el.style.display = 'block';
+      const wrap = document.getElementById('xuf-progress-wrap');
+      if (wrap) wrap.style.display = 'block';
     }
 
     function setProgress(count) {
-      const wrap = document.getElementById('xuf-progress-wrap');
-      const fill = document.getElementById('xuf-progress-fill');
       const label = document.getElementById('xuf-progress-label');
-      if (!wrap) return;
-      wrap.style.display = 'block';
-      fill.style.width = '100%';
-      if (label) label.textContent = `Loaded ${count} users…`;
+      if (label) label.textContent = `${label.textContent.replace(/ — .*/, '')} — loaded ${count} users…`;
     }
 
     function setScanBtn(enabled) {
@@ -330,78 +538,166 @@
         btn.disabled = !enabled;
         btn.textContent = enabled ? '▶ SCAN' : '⏳ Scanning…';
       }
-      const wrap = document.getElementById('xuf-progress-wrap');
-      if (wrap && enabled) wrap.style.display = 'none';
-      const label = document.getElementById('xuf-progress-label');
-      if (label && enabled) label.style.display = 'none';
+      if (enabled) {
+        const wrap = document.getElementById('xuf-progress-wrap');
+        if (wrap) wrap.style.display = 'none';
+        const label = document.getElementById('xuf-progress-label');
+        if (label) label.style.display = 'none';
+      }
     }
 
-    function showResults(nfb, following, followers) {
-      _following = following;
-      _followers = followers;
-      document.getElementById('xuf-s-following').textContent = following;
-      document.getElementById('xuf-s-followers').textContent = followers;
-      document.getElementById('xuf-s-notback').textContent = nfb.length;
-      document.getElementById('xuf-stats').style.display = 'grid';
-      document.getElementById('xuf-filter-row').style.display = 'flex';
-      document.getElementById('xuf-search').style.display = 'block';
-      renderResults();
+    function renderIdleView() {
+      return `
+        <div id="xuf-idle">
+          <div id="xuf-status"></div>
+          <button id="xuf-scan-btn" data-action="scan">▶ SCAN</button>
+          <div id="xuf-progress-wrap"><div id="xuf-progress-fill"></div></div>
+          <div id="xuf-progress-label"></div>
+        </div>
+      `;
     }
 
-    function renderResults() {
-      const list = document.getElementById('xuf-list');
-      if (!list) return;
-      const query = (document.getElementById('xuf-search')?.value || '').toLowerCase();
-      let users = notFollowingBack;
+    function renderSidebar() {
+      const filtered = getFilteredResults();
+      const notBack = results.filter(u => !u.followsBack);
+      const verifiedCount = results.filter(u => u.verified).length;
+      const whitelistedCount = results.filter(u => whitelist.includes(u.screen_name)).length;
+      return `
+        <div class="xuf-panel-heading"><span>Results</span><button class="xuf-btn-secondary" data-action="scan">↻ Re-scan</button></div>
+        <div class="xuf-filter-group">
+          <p class="xuf-group-label">Filter</p>
+          <label class="xuf-badge"><input type="checkbox" data-action="toggle-filter" data-filter="notFollowingBack" ${filter.notFollowingBack ? 'checked' : ''}/>Not following back</label>
+          <label class="xuf-badge"><input type="checkbox" data-action="toggle-filter" data-filter="followingBack" ${filter.followingBack ? 'checked' : ''}/>Following back</label>
+          <label class="xuf-badge"><input type="checkbox" data-action="toggle-filter" data-filter="verified" ${filter.verified ? 'checked' : ''}/>Verified</label>
+        </div>
+        <div class="xuf-btn-grid">
+          <button class="xuf-btn-secondary" data-action="select-all">All</button>
+          <button class="xuf-btn-secondary" data-action="select-verified">Verified</button>
+          <button class="xuf-btn-secondary danger" data-action="clear-selection">Clear</button>
+        </div>
+        <div class="xuf-stats">
+          <p><span>Displayed</span><strong id="xuf-stat-displayed">${filtered.length}</strong></p>
+          <p><span>Total scanned</span><strong>${results.length}</strong></p>
+          <p><span>Whitelisted</span><strong>★ ${whitelistedCount}</strong></p>
+        </div>
+        <div class="xuf-summary">
+          <h4>Scan Summary</h4>
+          <div class="xuf-summary-grid">
+            <div><span>Not following back</span><strong>${notBack.length}</strong></div>
+            <div><span>Verified</span><strong>${verifiedCount}</strong></div>
+            <div><span>Selected</span><strong>${selected.size}</strong></div>
+          </div>
+        </div>
+        <div class="xuf-pagination">
+          <button data-action="prev-page">❮</button>
+          <span>${Math.min(page, getMaxPage(filtered))}/${getMaxPage(filtered)}</span>
+          <button data-action="next-page">❯</button>
+        </div>
+        <button id="xuf-unfollow-btn" data-action="unfollow-selected" ${selected.size === 0 ? 'disabled' : ''}>Unfollow (${selected.size})</button>
+      `;
+    }
 
-      if (currentFilter === 'whitelisted') {
-        users = followingList.filter(u => whitelist.includes(u.screen_name));
-      } else if (currentFilter === 'notback') {
-        users = notFollowingBack.filter(u => !whitelist.includes(u.screen_name));
+    function renderUserRow(u) {
+      const wl = whitelist.includes(u.screen_name);
+      const sel = selected.has(u.screen_name);
+      return `
+        <div class="xuf-user">
+          <div class="xuf-avatar${wl ? ' wl' : ''}" data-action="toggle-whitelist" data-user="${u.screen_name}" title="${wl ? 'Remove from whitelist' : 'Add to whitelist'}">
+            <img src="${(u.avatar || '').replace('_normal', '_bigger')}" alt="${escapeHtml(u.name)}" loading="lazy" />
+          </div>
+          <div class="xuf-info">
+            <div class="xuf-name">${escapeHtml(u.name)} ${u.verified ? '<span class="xuf-verified" title="Verified">✔</span>' : ''}</div>
+            <div class="xuf-handle">@${u.screen_name}${u.followsBack ? '<span class="xuf-followsback">Follows you</span>' : ''}</div>
+          </div>
+          <a class="xuf-profile-btn" href="https://x.com/${u.screen_name}" target="_blank" rel="noreferrer">Profile ↗</a>
+          <input type="checkbox" class="xuf-select" data-action="toggle-select" data-user="${u.screen_name}" ${sel ? 'checked' : ''} />
+        </div>
+      `;
+    }
+
+    function renderListItems() {
+      const items = getCurrentPageItems(getFilteredResults());
+      return items.length ? items.map(renderUserRow).join('') : '<div class="xuf-empty">No users found.</div>';
+    }
+
+    function renderMain() {
+      return `
+        <nav class="xuf-tabs">
+          <button class="xuf-tab ${currentTab === 'nonWhitelisted' ? 'active' : ''}" data-action="tab" data-tab="nonWhitelisted">Non-Whitelisted</button>
+          <button class="xuf-tab ${currentTab === 'whitelisted' ? 'active' : ''}" data-action="tab" data-tab="whitelisted">Whitelisted</button>
+        </nav>
+        <input id="xuf-search" type="text" placeholder="Search by name or @handle…" value="${escapeHtml(searchTerm)}" data-action="search" />
+        <div id="xuf-list">${renderListItems()}</div>
+      `;
+    }
+
+    function renderQueueSidebar() {
+      const pct = unfollowTotal ? Math.round((unfollowDone / unfollowTotal) * 100) : 0;
+      return `
+        <div class="xuf-panel-heading"><span>Unfollow Queue</span><strong>${pct}%</strong></div>
+        ${unfollowStatusMsg ? `<div class="xuf-queue-status">${escapeHtml(unfollowStatusMsg)}</div>` : ''}
+        <div class="xuf-filter-group">
+          <p class="xuf-group-label">Filter</p>
+          <label class="xuf-badge"><input type="checkbox" data-action="toggle-log-filter" data-logfilter="showSucceeded" ${unfollowLogFilter.showSucceeded ? 'checked' : ''}/>Succeeded</label>
+          <label class="xuf-badge"><input type="checkbox" data-action="toggle-log-filter" data-logfilter="showFailed" ${unfollowLogFilter.showFailed ? 'checked' : ''}/>Failed</label>
+        </div>
+        ${isUnfollowing
+          ? `<button class="xuf-btn-secondary danger" data-action="stop-unfollow">Stop</button>`
+          : `<button class="xuf-btn-secondary" data-action="back-to-results">Back to results</button>`}
+      `;
+    }
+
+    function renderQueueLog() {
+      const entries = unfollowLog.filter(e => (e.success && unfollowLogFilter.showSucceeded) || (!e.success && unfollowLogFilter.showFailed));
+      const allDone = !isUnfollowing && unfollowLog.length > 0;
+      return `
+        ${allDone ? '<div class="xuf-all-done">All DONE!</div>' : ''}
+        ${entries.map((entry, i) => entry.success
+          ? `<div class="xuf-log-entry success">Unfollowed <a href="https://x.com/${entry.screen_name}" target="_blank" rel="noreferrer">@${entry.screen_name}</a><span class="xuf-log-index"> [${i + 1}/${entries.length}]</span></div>`
+          : `<div class="xuf-log-entry failed">Failed to unfollow @${entry.screen_name} — ${escapeHtml(entry.error || '')}</div>`
+        ).join('')}
+      `;
+    }
+
+    function renderBody() {
+      const body = document.getElementById('xuf-body');
+      if (!body) return;
+      if (viewState === 'idle') {
+        body.innerHTML = renderIdleView();
+      } else {
+        body.innerHTML = `
+          <div id="xuf-workspace">
+            <aside id="xuf-sidebar"></aside>
+            <main id="xuf-main"></main>
+          </div>`;
+        refreshSidebar();
+        refreshMain();
       }
+    }
 
-      if (query) {
-        users = users.filter(u =>
-          u.name.toLowerCase().includes(query) ||
-          u.screen_name.toLowerCase().includes(query)
-        );
-      }
+    function refreshSidebar() {
+      const el = document.getElementById('xuf-sidebar');
+      if (!el) return;
+      el.innerHTML = viewState === 'unfollowing' ? renderQueueSidebar() : renderSidebar();
+    }
 
-      if (!users.length) {
-        list.innerHTML = '<div class="xuf-empty">No users found.</div>';
+    function refreshMain() {
+      const main = document.getElementById('xuf-main');
+      if (!main) return;
+      if (viewState === 'unfollowing') {
+        main.innerHTML = renderQueueLog();
         return;
       }
-
-      list.innerHTML = users.map(u => {
-        const wl = whitelist.includes(u.screen_name);
-        return `
-          <div class="xuf-user" id="xuf-u-${u.screen_name}">
-            <div class="xuf-avatar${wl ? ' wl' : ''}" onclick="window.__xuf_toggleWL('${u.screen_name}')" title="${wl ? 'Remove from whitelist' : 'Add to whitelist'}">
-              <img src="${(u.avatar || '').replace('_normal', '_bigger')}" alt="${u.name}" loading="lazy" />
-            </div>
-            <div class="xuf-info">
-              <div class="xuf-name">${escapeHtml(u.name)}</div>
-              <div class="xuf-handle">@${u.screen_name}</div>
-            </div>
-            <div class="xuf-actions">
-              <a class="xuf-profile-btn" href="https://x.com/${u.screen_name}" target="_blank">Profile ↗</a>
-              <button class="xuf-wl-btn${wl ? ' wl' : ''}" onclick="window.__xuf_toggleWL('${u.screen_name}')">${wl ? '★ WL' : '☆ WL'}</button>
-            </div>
-          </div>`;
-      }).join('');
+      const list = document.getElementById('xuf-list');
+      if (list) {
+        list.innerHTML = renderListItems();
+      } else {
+        main.innerHTML = renderMain();
+      }
     }
 
-    return { inject, setStatus, setLabel, setProgress, setScanBtn, showResults, renderResults };
+    return { inject, setStatus, setLabel, setProgress, setScanBtn, renderBody, refreshSidebar, refreshMain };
   })();
-
-  function escapeHtml(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-
-  // Expose whitelist toggle globally (used in onclick)
-  window.__xuf_toggleWL = (screenName) => {
-    toggleWhitelist(screenName);
-  };
 
   UI.inject();
   console.log('%c X Unfollowers loaded! Click SCAN in the panel. ', 'background:#000;color:#fff;font-size:14px;padding:4px 8px;border-radius:4px;');
