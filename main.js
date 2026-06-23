@@ -331,10 +331,9 @@
       if (document.getElementById(ID)) return;
       const style = document.createElement('style');
       style.textContent = `
-        #xuf-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999998}
         #xuf-root *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-        #xuf-root{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:min(1040px,94vw);min-width:780px;height:min(720px,90vh);background:#fff;border:1px solid #e1e8ed;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.4);z-index:9999999;overflow:hidden;display:flex;flex-direction:column;font-size:14px;color:#0f1419}
-        #xuf-header{background:#000;color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+        #xuf-root{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:min(1040px,94vw);min-width:780px;max-width:1400px;height:min(720px,90vh);min-height:480px;max-height:95vh;background:#fff;border:1px solid #e1e8ed;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.4);z-index:9999999;overflow:hidden;display:flex;flex-direction:column;font-size:14px;color:#0f1419;resize:both}
+        #xuf-header{background:#000;color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;cursor:move;user-select:none}
         #xuf-header h2{font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px}
         #xuf-close{background:none;border:none;color:#fff;cursor:pointer;font-size:20px;line-height:1;padding:2px 6px;border-radius:6px;opacity:.7;transition:opacity .15s}
         #xuf-close:hover{opacity:1}
@@ -418,10 +417,6 @@
       `;
       document.head.appendChild(style);
 
-      const backdrop = document.createElement('div');
-      backdrop.id = 'xuf-backdrop';
-      document.body.appendChild(backdrop);
-
       const root = document.createElement('div');
       root.id = ID;
       root.innerHTML = `
@@ -443,8 +438,37 @@
       root.addEventListener('click', onRootClick);
       root.addEventListener('change', onRootChange);
       root.addEventListener('input', onRootInput);
+      makeDraggable(root, document.getElementById('xuf-header'));
 
       renderBody();
+    }
+
+    function makeDraggable(panel, handle) {
+      let dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      handle.addEventListener('mousedown', (e) => {
+        if (e.target.closest('#xuf-close')) return;
+        const rect = panel.getBoundingClientRect();
+        panel.style.left = rect.left + 'px';
+        panel.style.top = rect.top + 'px';
+        panel.style.transform = 'none';
+        dragging = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        startLeft = rect.left;
+        startTop = rect.top;
+        e.preventDefault();
+      });
+      window.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        const rect = panel.getBoundingClientRect();
+        let newLeft = startLeft + (e.clientX - startX);
+        let newTop = startTop + (e.clientY - startY);
+        newLeft = Math.max(0, Math.min(window.innerWidth - rect.width, newLeft));
+        newTop = Math.max(0, Math.min(window.innerHeight - rect.height, newTop));
+        panel.style.left = newLeft + 'px';
+        panel.style.top = newTop + 'px';
+      });
+      window.addEventListener('mouseup', () => { dragging = false; });
     }
 
     function onRootClick(e) {
@@ -454,7 +478,6 @@
       if (action === 'scan') {
         runScan();
       } else if (action === 'close') {
-        document.getElementById('xuf-backdrop')?.remove();
         document.getElementById(ID)?.remove();
       } else if (action === 'tab') {
         currentTab = el.dataset.tab;
