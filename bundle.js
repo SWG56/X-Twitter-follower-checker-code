@@ -47,11 +47,11 @@ throw e;
 }
 }
 async function getMyUserId() {
-const data = await apiFetch('https://api.twitter.com/1.1/account/verify_credentials.json?skip_status=true&include_entities=false');
+const data = await apiFetch('https://x.com/i/api/1.1/account/verify_credentials.json?skip_status=true&include_entities=false');
 return { id: data.id_str, screenName: data.screen_name, name: data.name };
 }
 async function fetchPagedList(endpoint, userId, cursor = '-1', collected = []) {
-const url = `https://api.twitter.com/1.1/${endpoint}.json?user_id=${userId}&count=200&cursor=${cursor}&skip_status=true&include_user_entities=false`;
+const url = `https://x.com/i/api/1.1/${endpoint}.json?user_id=${userId}&count=200&cursor=${cursor}&skip_status=true&include_user_entities=false`;
 const data = await apiFetch(url);
 const users = data.users || [];
 collected.push(...users);
