@@ -8,8 +8,10 @@
   'use strict';
 
   // ─── Constants ────────────────────────────────────────────────
-  const DELAY_MS = 800;
-  const MAX_RETRIES = 3;
+  const SCROLL_DELAY_MS = 900;
+  const IDLE_ROUNDS = 4;
+  const MAX_SCROLL_ROUNDS = 600;
+  const NAV_TIMEOUT_MS = 10000;
   const LS_WHITELIST_KEY = 'xuf_whitelist';
 
   // ─── State ────────────────────────────────────────────────────
@@ -19,80 +21,101 @@
   let notFollowingBack = [];
   let isRunning = false;
 
-  // ─── Grab auth tokens from cookies / meta ────────────────────
-  function getCookie(name) {
-    const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
-    return m ? decodeURIComponent(m[1]) : null;
-  }
-
-  function getAuthHeaders() {
-    const ct0 = getCookie('ct0');
-    // auth_token is HttpOnly — the browser still sends it via credentials:'include',
-    // but JS can never read it, so only ct0 (csrf token) is checked here.
-    if (!ct0) throw new Error('Not logged in to X. Please log in first.');
-    // Bearer token is the same public one X's web app uses
-    const bearer = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
-    return {
-      'Authorization': `Bearer ${bearer}`,
-      'x-csrf-token': ct0,
-      'x-twitter-auth-type': 'OAuth2Session',
-      'x-twitter-client-language': 'en',
-      'x-twitter-active-user': 'yes',
-      'content-type': 'application/json',
-    };
-  }
-
-  // ─── API Helpers ──────────────────────────────────────────────
+  // ─── Helpers ──────────────────────────────────────────────────
   function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
   }
 
-  async function apiFetch(url, retries = 0) {
-    try {
-      const res = await fetch(url, { headers: getAuthHeaders(), credentials: 'include' });
-      if (res.status === 429) {
-        UI.setStatus('Rate limited — waiting 60s…', 'warn');
-        await sleep(60000);
-        return apiFetch(url, retries);
-      }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    } catch (e) {
-      if (retries < MAX_RETRIES) {
-        await sleep(2000 * (retries + 1));
-        return apiFetch(url, retries + 1);
-      }
-      throw e;
+  async function waitForSelector(selector, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (document.querySelector(selector)) return true;
+      await sleep(250);
     }
+    return false;
   }
 
-  // Requests go through x.com's own proxy (not api.twitter.com) so the
-  // x.com-scoped ct0/auth_token cookies are actually sent with the request.
-  async function getMyUserId() {
-    const data = await apiFetch('https://x.com/i/api/1.1/account/verify_credentials.json?skip_status=true&include_entities=false');
-    return { id: data.id_str, screenName: data.screen_name, name: data.name };
+  async function waitForPath(path, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (location.pathname === path) return true;
+      await sleep(150);
+    }
+    return false;
   }
 
-  async function fetchPagedList(endpoint, userId, cursor = '-1', collected = []) {
-    const url = `https://x.com/i/api/1.1/${endpoint}.json?user_id=${userId}&count=200&cursor=${cursor}&skip_status=true&include_user_entities=false`;
-    const data = await apiFetch(url);
-    const users = data.users || [];
-    collected.push(...users);
-    UI.setProgress(collected.length);
-    const next = data.next_cursor_str;
-    if (next && next !== '0') {
-      await sleep(DELAY_MS);
-      return fetchPagedList(endpoint, userId, next, collected);
+  // X's GraphQL API now requires anti-bot signing that a console script can't
+  // replicate reliably, so instead of calling any API we drive the page itself:
+  // click the real Following/Followers links (so X's own router handles the
+  // navigation) and read user cards straight out of the rendered DOM.
+  function clickHref(href) {
+    const el = document.querySelector(`a[href="${href}"]`);
+    if (!el) return false;
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    return true;
+  }
+
+  function getMyHandle() {
+    const link = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
+    if (!link) return null;
+    const href = link.getAttribute('href') || '';
+    const m = href.match(/^\/([^\/?]+)/);
+    return m ? m[1] : null;
+  }
+
+  function extractUsersFromDom() {
+    const cells = document.querySelectorAll('[data-testid="UserCell"]');
+    const users = [];
+    cells.forEach(cell => {
+      let screenName = null;
+      const avatarContainer = cell.querySelector('[data-testid^="UserAvatar-Container-"]');
+      if (avatarContainer) {
+        screenName = avatarContainer.getAttribute('data-testid').slice('UserAvatar-Container-'.length);
+      }
+      if (!screenName) {
+        const profileLink = cell.querySelector('a[href^="/"]');
+        if (profileLink) {
+          const m = profileLink.getAttribute('href').match(/^\/([^\/?]+)\/?$/);
+          if (m) screenName = m[1];
+        }
+      }
+      if (!screenName) return;
+      const img = cell.querySelector('img');
+      const avatar = img ? img.src : '';
+      let name = screenName;
+      for (const span of cell.querySelectorAll('span')) {
+        const t = span.textContent.trim();
+        if (t && !t.startsWith('@') && t !== 'Follows you') { name = t; break; }
+      }
+      users.push({ screen_name: screenName, name, avatar });
+    });
+    return users;
+  }
+
+  async function collectAllUsers(onProgress) {
+    const seen = new Map();
+    let idle = 0;
+    let lastHeight = -1;
+    let rounds = 0;
+    while (idle < IDLE_ROUNDS && rounds < MAX_SCROLL_ROUNDS) {
+      extractUsersFromDom().forEach(u => seen.set(u.screen_name, u));
+      onProgress(seen.size);
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(SCROLL_DELAY_MS);
+      const h = document.body.scrollHeight;
+      if (h === lastHeight) idle++; else idle = 0;
+      lastHeight = h;
+      rounds++;
     }
-    return collected;
+    return [...seen.values()];
   }
 
   // ─── Whitelist ────────────────────────────────────────────────
-  function toggleWhitelist(id) {
-    if (whitelist.includes(id)) {
-      whitelist = whitelist.filter(x => x !== id);
+  function toggleWhitelist(screenName) {
+    if (whitelist.includes(screenName)) {
+      whitelist = whitelist.filter(x => x !== screenName);
     } else {
-      whitelist.push(id);
+      whitelist.push(screenName);
     }
     localStorage.setItem(LS_WHITELIST_KEY, JSON.stringify(whitelist));
     UI.renderResults();
@@ -107,20 +130,44 @@
     notFollowingBack = [];
     UI.setScanBtn(false);
     try {
-      UI.setStatus('Getting your profile…', 'info');
-      const me = await getMyUserId();
-      UI.setStatus(`Scanning @${me.screenName}…`, 'info');
+      UI.setStatus('Detecting your profile…', 'info');
+      const handle = getMyHandle();
+      if (!handle) throw new Error('Could not detect your username. Make sure you are logged in to x.com and reload the page.');
 
-      UI.setStatus('Fetching people you follow…', 'info');
+      const followingPath = `/${handle}/following`;
+      const followersPath = `/${handle}/followers`;
+
+      if (!document.querySelector(`a[href="${followingPath}"]`)) {
+        UI.setStatus('Opening your profile…', 'info');
+        if (!clickHref(`/${handle}`)) throw new Error('Could not open your profile page.');
+        const found = await waitForSelector(`a[href="${followingPath}"]`, NAV_TIMEOUT_MS);
+        if (!found) throw new Error('Could not load your profile page. Open it manually, then click SCAN again.');
+      }
+
+      UI.setStatus(`Opening @${handle}'s Following list…`, 'info');
       UI.setLabel('Following');
-      followingList = await fetchPagedList('friends/list', me.id);
+      if (location.pathname !== followingPath) {
+        if (!clickHref(followingPath)) throw new Error(`Could not open ${followingPath}. Open it manually, then click SCAN again.`);
+        await waitForPath(followingPath, NAV_TIMEOUT_MS);
+        await sleep(1200);
+      }
+      const followingOk = await waitForSelector('[data-testid="UserCell"]', NAV_TIMEOUT_MS);
+      if (!followingOk) throw new Error('Your Following list did not load. Try scrolling down manually, then click SCAN again.');
+      UI.setStatus('Scanning who you follow…', 'info');
+      followingList = await collectAllUsers(n => UI.setProgress(n));
 
-      UI.setStatus('Fetching your followers…', 'info');
+      UI.setStatus(`Opening @${handle}'s Followers list…`, 'info');
       UI.setLabel('Followers');
-      const followers = await fetchPagedList('followers/list', me.id);
-      followers.forEach(u => followerSet.add(u.id_str));
+      if (!clickHref(followersPath)) throw new Error(`Could not open ${followersPath}. Open it manually, then click SCAN again.`);
+      await waitForPath(followersPath, NAV_TIMEOUT_MS);
+      await sleep(1200);
+      const followersOk = await waitForSelector('[data-testid="UserCell"]', NAV_TIMEOUT_MS);
+      if (!followersOk) throw new Error('Your Followers list did not load. Try scrolling down manually, then click SCAN again.');
+      UI.setStatus('Scanning your followers…', 'info');
+      const followers = await collectAllUsers(n => UI.setProgress(n));
+      followerSet = new Set(followers.map(u => u.screen_name));
 
-      notFollowingBack = followingList.filter(u => !followerSet.has(u.id_str));
+      notFollowingBack = followingList.filter(u => !followerSet.has(u.screen_name));
       UI.setStatus(`Done! ${notFollowingBack.length} people don't follow you back.`, 'success');
       UI.showResults(notFollowingBack, followingList.length, followers.length);
     } catch (e) {
@@ -308,9 +355,9 @@
       let users = notFollowingBack;
 
       if (currentFilter === 'whitelisted') {
-        users = followingList.filter(u => whitelist.includes(u.id_str));
+        users = followingList.filter(u => whitelist.includes(u.screen_name));
       } else if (currentFilter === 'notback') {
-        users = notFollowingBack.filter(u => !whitelist.includes(u.id_str));
+        users = notFollowingBack.filter(u => !whitelist.includes(u.screen_name));
       }
 
       if (query) {
@@ -326,11 +373,11 @@
       }
 
       list.innerHTML = users.map(u => {
-        const wl = whitelist.includes(u.id_str);
+        const wl = whitelist.includes(u.screen_name);
         return `
-          <div class="xuf-user" id="xuf-u-${u.id_str}">
-            <div class="xuf-avatar${wl ? ' wl' : ''}" onclick="window.__xuf_toggleWL('${u.id_str}')" title="${wl ? 'Remove from whitelist' : 'Add to whitelist'}">
-              <img src="${u.profile_image_url_https?.replace('_normal', '_bigger') || ''}" alt="${u.name}" loading="lazy" />
+          <div class="xuf-user" id="xuf-u-${u.screen_name}">
+            <div class="xuf-avatar${wl ? ' wl' : ''}" onclick="window.__xuf_toggleWL('${u.screen_name}')" title="${wl ? 'Remove from whitelist' : 'Add to whitelist'}">
+              <img src="${(u.avatar || '').replace('_normal', '_bigger')}" alt="${u.name}" loading="lazy" />
             </div>
             <div class="xuf-info">
               <div class="xuf-name">${escapeHtml(u.name)}</div>
@@ -338,7 +385,7 @@
             </div>
             <div class="xuf-actions">
               <a class="xuf-profile-btn" href="https://x.com/${u.screen_name}" target="_blank">Profile ↗</a>
-              <button class="xuf-wl-btn${wl ? ' wl' : ''}" onclick="window.__xuf_toggleWL('${u.id_str}')">${wl ? '★ WL' : '☆ WL'}</button>
+              <button class="xuf-wl-btn${wl ? ' wl' : ''}" onclick="window.__xuf_toggleWL('${u.screen_name}')">${wl ? '★ WL' : '☆ WL'}</button>
             </div>
           </div>`;
       }).join('');
@@ -352,8 +399,8 @@
   }
 
   // Expose whitelist toggle globally (used in onclick)
-  window.__xuf_toggleWL = (id) => {
-    toggleWhitelist(id);
+  window.__xuf_toggleWL = (screenName) => {
+    toggleWhitelist(screenName);
   };
 
   UI.inject();
