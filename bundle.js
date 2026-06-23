@@ -33,10 +33,11 @@ return new Promise(r => setTimeout(r, ms));
 function randomDelay(min, max) {
 return min + Math.random() * (max - min);
 }
-async function waitForSelector(selector, timeoutMs) {
+async function waitForSelector(selector, timeoutMs, scope) {
 const start = Date.now();
+const root = scope || document;
 while (Date.now() - start < timeoutMs) {
-if (document.querySelector(selector)) return true;
+if (root.querySelector(selector)) return true;
 await sleep(250);
 }
 return false;
@@ -213,11 +214,16 @@ UI.setScanBtn(true);
 async function unfollowUser(user) {
 const ok = await navigateTo(`/${user.screen_name}`);
 if (!ok) throw new Error('Could not open profile.');
-const found = await waitForSelector('button[data-testid$="-unfollow"]', NAV_TIMEOUT_MS);
+const avatarSelector = `[data-testid="UserAvatar-Container-${user.screen_name}"]`;
+const profileReady = await waitForSelector(avatarSelector, NAV_TIMEOUT_MS);
+if (!profileReady) throw new Error('Profile page did not load.');
+await sleep(400);
+const scope = document.querySelector('[data-testid="primaryColumn"]') || document;
+const found = await waitForSelector('button[data-testid$="-unfollow"]', NAV_TIMEOUT_MS, scope);
 if (!found) throw new Error('Following button not found (already unfollowed or page changed).');
-document.querySelector('button[data-testid$="-unfollow"]')
+scope.querySelector('button[data-testid$="-unfollow"]')
 .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-const confirmFound = await waitForSelector('[data-testid="confirmationSheetConfirm"]', 5000);
+const confirmFound = await waitForSelector('[data-testid="confirmationSheetConfirm"]', 6000);
 if (!confirmFound) throw new Error('Confirmation dialog did not appear.');
 document.querySelector('[data-testid="confirmationSheetConfirm"]')
 .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
@@ -276,7 +282,7 @@ const style = document.createElement('style');
 style.textContent = `
 #xuf-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999998}
 #xuf-root *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-#xuf-root{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:min(1040px,94vw);height:min(720px,90vh);background:#fff;border:1px solid #e1e8ed;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.4);z-index:9999999;overflow:hidden;display:flex;flex-direction:column;font-size:14px;color:#0f1419}
+#xuf-root{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:min(1040px,94vw);min-width:780px;height:min(720px,90vh);background:#fff;border:1px solid #e1e8ed;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.4);z-index:9999999;overflow:hidden;display:flex;flex-direction:column;font-size:14px;color:#0f1419}
 #xuf-header{background:#000;color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
 #xuf-header h2{font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px}
 #xuf-close{background:none;border:none;color:#fff;cursor:pointer;font-size:20px;line-height:1;padding:2px 6px;border-radius:6px;opacity:.7;transition:opacity .15s}
@@ -319,7 +325,7 @@ style.textContent = `
 .xuf-tab.active{color:#1d9bf0;border-color:#1d9bf0}
 #xuf-search{width:100%;padding:7px 10px;border:1px solid #cfd9de;border-radius:999px;font-size:13px;margin-bottom:10px;outline:none;color:#0f1419;flex-shrink:0}
 #xuf-search:focus{border-color:#1d9bf0}
-#xuf-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+#xuf-list{flex:1;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:8px}
 .xuf-user{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid #e1e8ed;border-radius:12px;background:#fff;transition:background .1s;cursor:default}
 .xuf-user:hover{background:#f7f9f9}
 .xuf-avatar{width:40px;height:40px;border-radius:50%;flex-shrink:0;border:1px solid #e1e8ed;cursor:pointer;position:relative;overflow:hidden;background:#e1e8ed}
