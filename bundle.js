@@ -48,11 +48,11 @@ throw e;
 }
 }
 async function getMyUserId() {
-const data = await apiFetch('https:
+const data = await apiFetch('https://api.twitter.com/1.1/account/verify_credentials.json?skip_status=true&include_entities=false');
 return { id: data.id_str, screenName: data.screen_name, name: data.name };
 }
 async function fetchPagedList(endpoint, userId, cursor = '-1', collected = []) {
-const url = `https:
+const url = `https://api.twitter.com/1.1/${endpoint}.json?user_id=${userId}&count=200&cursor=${cursor}&skip_status=true&include_user_entities=false`;
 const data = await apiFetch(url);
 const users = data.users || [];
 collected.push(...users);
@@ -198,7 +198,7 @@ Unfollowers
 <div id="xuf-list"><div class="xuf-empty">Click SCAN to start.</div></div>
 </div>
 <div id="xuf-footer">
-<span>💙 <a href="https:
+<span>💙 <a href="https://github.com/SWG56/X-Twitter-follower-checker-code" target="_blank">x-unfollowers</a></span>
 <span>Click avatar to whitelist</span>
 </div>
 `;
@@ -292,7 +292,7 @@ return `
 <div class="xuf-handle">@${u.screen_name}</div>
 </div>
 <div class="xuf-actions">
-<a class="xuf-profile-btn" href="https:
+<a class="xuf-profile-btn" href="https://x.com/${u.screen_name}" target="_blank">Profile ↗</a>
 <button class="xuf-wl-btn${wl ? ' wl' : ''}" onclick="window.__xuf_toggleWL('${u.id_str}')">${wl ? '★ WL' : '☆ WL'}</button>
 </div>
 </div>`;

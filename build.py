@@ -5,10 +5,8 @@ Usage: python3 build.py
 """
 import re, os, sys
 
-SRC = 'src/main.js'
-DIST = 'dist/bundle.js'
-
-os.makedirs('dist', exist_ok=True)
+SRC = 'main.js'
+DIST = 'bundle.js'
 
 with open(SRC) as f:
     code = f.read()
@@ -16,8 +14,9 @@ with open(SRC) as f:
 # Remove block comments (/** ... */ and /* ... */)
 code = re.sub(r'/\*[\s\S]*?\*/', '', code)
 
-# Remove single-line comments (but keep lines, just remove the comment part)
-code = re.sub(r'[ \t]*//[^\n]*', '', code)
+# Remove single-line comments only when // is not preceded by : or a word char
+# This preserves https:// and similar URLs inside strings
+code = re.sub(r'(?<![:\w])//[^\n]*', '', code)
 
 # Remove blank lines
 code = re.sub(r'\n[\s\n]*\n', '\n', code)

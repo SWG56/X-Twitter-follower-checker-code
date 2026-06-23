@@ -1,7 +1,7 @@
 /**
  * X (Twitter) Unfollowers
  * Paste this in the browser console while logged in to x.com
- * GitHub: https://github.com/YOUR_USERNAME/x-unfollowers
+ * GitHub: https://github.com/SWG56/X-Twitter-follower-checker-code
  */
 
 (async function XUnfollowers() {
@@ -228,7 +228,7 @@
           <div id="xuf-list"><div class="xuf-empty">Click SCAN to start.</div></div>
         </div>
         <div id="xuf-footer">
-          <span>💙 <a href="https://github.com/YOUR_USERNAME/x-unfollowers" target="_blank">x-unfollowers</a></span>
+          <span>💙 <a href="https://github.com/SWG56/X-Twitter-follower-checker-code" target="_blank">x-unfollowers</a></span>
           <span>Click avatar to whitelist</span>
         </div>
       `;
