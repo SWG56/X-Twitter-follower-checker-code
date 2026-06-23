@@ -27,8 +27,9 @@
 
   function getAuthHeaders() {
     const ct0 = getCookie('ct0');
-    const authToken = getCookie('auth_token');
-    if (!ct0 || !authToken) throw new Error('Not logged in to X. Please log in first.');
+    // auth_token is HttpOnly — the browser still sends it via credentials:'include',
+    // but JS can never read it, so only ct0 (csrf token) is checked here.
+    if (!ct0) throw new Error('Not logged in to X. Please log in first.');
     // Bearer token is the same public one X's web app uses
     const bearer = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
     return {

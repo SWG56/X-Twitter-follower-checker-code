@@ -5,10 +5,12 @@ Usage: python3 build.py
 """
 import re, os, sys
 
+sys.stdout.reconfigure(encoding='utf-8')
+
 SRC = 'main.js'
 DIST = 'bundle.js'
 
-with open(SRC) as f:
+with open(SRC, encoding='utf-8') as f:
     code = f.read()
 
 # Remove block comments (/** ... */ and /* ... */)
@@ -25,7 +27,7 @@ code = re.sub(r'\n[\s\n]*\n', '\n', code)
 lines = [l.strip() for l in code.split('\n') if l.strip()]
 code = '\n'.join(lines)
 
-with open(DIST, 'w') as f:
+with open(DIST, 'w', encoding='utf-8') as f:
     f.write(code)
 
 size_kb = len(code) / 1024
